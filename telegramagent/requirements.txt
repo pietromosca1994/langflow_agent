@@ -1,0 +1,4 @@
+aiohttp==3.12.6
+python-telegram-bot==22.1
+Requests==2.32.3
+# whisper==1.1.10

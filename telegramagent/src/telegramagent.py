@@ -15,6 +15,7 @@ MAX_LENGTH = 4096  # Telegram message limit
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 LANGFLOW_TOKEN = os.getenv("LANGFLOW_TOKEN")
 LANGFLOW_FLOW_ID = os.getenv("LANGFLOW_FLOW_ID")
+WHISPER=False
 
 async def keep_typing(context, chat_id, stop_event):
     """Keep sending typing indicator every 4 seconds until stopped"""
@@ -65,9 +66,11 @@ class TelegramAgent:
         
         self.init_logger(verbose)
         self.init_app()
-        self.whisper_model=whisper.load_model("small")
-        self.temp_folder=os.path.join(os.getcwd(), "temp")
-        os.makedirs(self.temp_folder, exist_ok=True)  # Ensure temp folder exists
+
+        if WHISPER==True:
+            self.whisper_model=whisper.load_model("small")
+            self.tmp_folder=os.path.join(os.getcwd(), "temp")
+            os.makedirs(self.tmp_folder, exist_ok=True)  # Ensure temp folder exists
     
     def run(self):
         self.logger.info("Bot is running and waiting for messages...")
@@ -150,14 +153,15 @@ class TelegramAgent:
         file = await context.bot.get_file(voice.file_id)
         
         # download the voice message to a temporary file
-        file_path = os.path.join(self.temp_folder, f"voice.ogg")
+        file_path = os.path.join(self.tmp_folder, f"voice.ogg")
         await file.download_to_drive(file_path)
         
         # text to speech conversion using Whisper
-        incoming = self.text_to_speech_whisper(file_path)
-        self.logger.info(f"Message from {from_user__username}: {incoming}")
+        if WHISPER==True:
+            incoming = self.text_to_speech_whisper(file_path)
+            self.logger.info(f"Message from {from_user__username}: {incoming}")
 
-        await self.reply_with_langflow_api(incoming, update, context)
+            await self.reply_with_langflow_api(incoming, update, context)
         
         pass
 

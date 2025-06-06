@@ -15,7 +15,7 @@ MAX_LENGTH = 4096  # Telegram message limit
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 LANGFLOW_TOKEN = os.getenv("LANGFLOW_TOKEN")
 LANGFLOW_FLOW_ID = os.getenv("LANGFLOW_FLOW_ID")
-WHISPER=False
+WHISPER=True
 
 async def keep_typing(context, chat_id, stop_event):
     """Keep sending typing indicator every 4 seconds until stopped"""
@@ -43,12 +43,8 @@ def with_langflow_api(func):
             # Process with Langflow if needed
             if incoming:
                 reply = self.call_langflow_api(incoming)
-                if reply:
-                    for chunk in self._split_message(reply):
-                        await update.message.reply_text(chunk, parse_mode="Markdown")
-
-                else:
-                    await update.message.reply_text("Sorry, I couldn't process your message right now.")
+                await self.reply(reply, update)
+        
         finally:
             # Stop the typing indicator
             stop_typing.set()
@@ -80,7 +76,18 @@ class TelegramAgent:
         self.app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text_message))
         self.app.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message))
-       
+
+    async def reply(self, reply: str,  update: Update):
+        try:
+            if reply:
+                for chunk in self._split_message(reply):
+                    await update.message.reply_text(chunk, parse_mode="Markdown")
+
+            else:
+                await update.message.reply_text("Sorry, I couldn't process your message right now.")
+        except Exception as e:
+            self.logger.error(f'Failed to send reply: {e}')
+
     def init_logger(self, verbose=logging.INFO):
         """Initialize the logger for the Telegram agent."""
         self.logger = logging.getLogger('api')  # Get a logger unique to the class
@@ -103,7 +110,7 @@ class TelegramAgent:
             # Prevent logs from propagating to the root logger
             self.logger.propagate = False
 
-    async def reply_with_langflow_api(self, incoming: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def reply_with_langflow_api(self, incoming: str, update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
 
         stop_typing = asyncio.Event()
     
@@ -116,12 +123,10 @@ class TelegramAgent:
             # Process with Langflow if needed
             if incoming:
                 reply = await self.call_langflow_api(incoming)
-                if reply:
-                    for chunk in self._split_message(reply):
-                        await update.message.reply_text(chunk, parse_mode="Markdown")
+                await self.reply(reply, update)
 
-                else:
-                    await update.message.reply_text("Sorry, I couldn't process your message right now.")
+            else:
+                await update.message.reply_text("Sorry, I couldn't process your message right now.")
             # await asyncio.sleep(10)
         finally:
             # Stop the typing indicator
@@ -166,57 +171,196 @@ class TelegramAgent:
         pass
 
     @staticmethod
-    def _split_message(text, max_length=MAX_LENGTH):
+    def _split_message(text: str, max_length: int = MAX_LENGTH) -> list[str]:
         """
-        Splits a Markdown-formatted text into chunks under max_length,
-        ensuring Markdown formatting stays valid (balanced * _ `).
+        Split a text message into chunks that respect Telegram's max_length limit
+        while preserving valid Markdown formatting, especially code blocks.
+
+        Args:
+            text (str): The input text to split.
+            max_length (int): Maximum length of each chunk (default: 4096).
+
+        Returns:
+            list[str]: List of valid Markdown chunks.
         """
-        def is_balanced(s):
-            return (
-                s.count("*") % 2 == 0 and
-                s.count("_") % 2 == 0 and
-                s.count("`") % 2 == 0
-            )
+        if not text:
+            return []
 
-        def safe_append(buffer, chunks):
-            if buffer.strip():
-                chunks.append(buffer.strip())
-
-        paragraphs = re.split(r"(\n\s*\n)", text)  # Keep paragraph breaks
         chunks = []
-        buffer = ""
+        current_chunk = []
+        current_length = 0
+        in_code_block = False
+        
+        # Split text into lines to process them individually
+        lines = text.split('\n')
 
-        for para in paragraphs:
-            if len(buffer) + len(para) <= max_length:
-                buffer += para
-            else:
-                # Break paragraph into sentences
-                sentences = re.split(r'(?<=[.!?]) +', para)
-                for sentence in sentences:
-                    if len(buffer) + len(sentence) <= max_length:
-                        buffer += sentence
+        for line in lines:
+            line_len = len(line) + 1  # +1 for the newline character
+
+            # Check for code block delimiters
+            if '```' in line:
+                # If there are multiple ``` on one line, handle them sequentially
+                parts = line.split('```')
+                for i, part in enumerate(parts):
+                    if i % 2 == 0:  # Text outside of potential '```'
+                        if in_code_block: # If already in a code block, this `part` is plain text within it
+                            if current_length + len(part) + 3 + 1 > max_length: # +3 for ```, +1 for newline
+                                if current_chunk:
+                                    chunks.append('\n'.join(current_chunk) + '\n```') # Close current code block
+                                current_chunk = ['```'] # Start new code block
+                                current_length = 3
+                            current_chunk.append(part)
+                            current_length += len(part) + 1
+                        else: # Not in code block, regular text part
+                            if current_length + len(part) + 1 > max_length:
+                                if current_chunk:
+                                    chunks.append('\n'.join(current_chunk))
+                                current_chunk = []
+                                current_length = 0
+                            current_chunk.append(part)
+                            current_length += len(part) + 1
+                    else: # This 'part' is between '```' markers or is empty
+                        if in_code_block: # Closing a code block
+                            if current_chunk:
+                                chunks.append('\n'.join(current_chunk) + '```')
+                                current_chunk = []
+                                current_length = 0
+                            in_code_block = False
+                        else: # Opening a code block
+                            if current_length > 0: # Add any accumulated text before the code block
+                                chunks.append('\n'.join(current_chunk))
+                                current_chunk = []
+                                current_length = 0
+                            current_chunk.append('```' + part)
+                            current_length += 3 + len(part) # Account for ``` and content
+                            in_code_block = True
+                            
+                # Special handling for lines ending or starting with ```
+                if line.endswith('```') and not in_code_block: # A closing ``` just ended a block
+                    pass # Already handled by the logic above
+                elif line.startswith('```') and in_code_block: # An opening ``` just started a block
+                    pass # Already handled
+                elif line.count('```') % 2 != 0: # Unclosed code block on this line
+                    in_code_block = not in_code_block
+                    if in_code_block: # Just entered a code block
+                        if current_length > 0:
+                            chunks.append('\n'.join(current_chunk))
+                            current_chunk = []
+                            current_length = 0
+                        current_chunk.append(line)
+                        current_length += line_len
+                    else: # Just exited a code block
+                        current_chunk.append(line)
+                        current_length += line_len
+                        chunks.append('\n'.join(current_chunk))
+                        current_chunk = []
+                        current_length = 0
+                else: # No ` ` ` on this line or balanced ` ` `
+                    if current_length + line_len > max_length:
+                        if current_chunk:
+                            chunks.append('\n'.join(current_chunk))
+                        current_chunk = [line]
+                        current_length = line_len
                     else:
-                        if is_balanced(buffer):
-                            safe_append(buffer, chunks)
-                            buffer = sentence
-                        else:
-                            # Try to fix imbalance by dropping last token (fallback)
-                            buffer = buffer.rstrip("*_`")
-                            safe_append(buffer, chunks)
-                            buffer = sentence
+                        current_chunk.append(line)
+                        current_length += line_len
+            else: # Not a code block delimiter line
+                if in_code_block:
+                    if current_length + line_len > max_length - 3: # Need room for closing ```
+                        chunks.append('\n'.join(current_chunk) + '\n```')
+                        current_chunk = ['```'] # Start new code block chunk
+                        current_length = 3 + line_len
+                        current_chunk.append(line)
+                    else:
+                        current_chunk.append(line)
+                        current_length += line_len
+                else:
+                    if current_length + line_len > max_length:
+                        # If current accumulated chunk plus new line exceeds max_length
+                        # Try to split the accumulated chunk by sentences/paragraphs if possible
+                        temp_chunk_content = '\n'.join(current_chunk)
+                        
+                        # Split by paragraphs
+                        paragraphs = re.split(r'(\n{2,})', temp_chunk_content)
+                        temp_buffer = []
+                        temp_buffer_len = 0
+                        
+                        for p_idx, p in enumerate(paragraphs):
+                            if temp_buffer_len + len(p) + 1 <= max_length:
+                                temp_buffer.append(p)
+                                temp_buffer_len += len(p) + 1
+                            else:
+                                if temp_buffer:
+                                    chunks.append('\n'.join(temp_buffer))
+                                temp_buffer = [p]
+                                temp_buffer_len = len(p) + 1
+                        
+                        if temp_buffer:
+                            chunks.append('\n'.join(temp_buffer))
+                        
+                        # Start a new chunk with the current line
+                        current_chunk = [line]
+                        current_length = line_len
+                    else:
+                        current_chunk.append(line)
+                        current_length += line_len
 
-        safe_append(buffer, chunks)
+        # Add any remaining content in current_chunk to chunks
+        if current_chunk:
+            final_chunk = '\n'.join(current_chunk)
+            if in_code_block:
+                final_chunk += '\n```' # Ensure code block is closed
+            chunks.append(final_chunk)
 
-        # Fallback: final pass to ensure no chunk exceeds max_length
-        final_chunks = []
+        # Final pass to ensure all chunks are within max_length and properly closed
+        # This handles cases where a single line or segment was longer than MAX_LENGTH
+        # and ensures all Markdown elements are balanced.
+        final_safe_chunks = []
         for chunk in chunks:
             if len(chunk) > max_length:
-                wrapped = textwrap.wrap(chunk, width=max_length, break_long_words=False, replace_whitespace=False)
-                final_chunks.extend(wrapped)
+                # For chunks still too long, perform a hard wrap, trying to be smart about markdown
+                # This is a fallback and might break complex markdown if a single line is too long.
+                sub_chunks = textwrap.wrap(chunk, width=max_length, break_long_words=False, 
+                                            replace_whitespace=False, break_on_hyphens=False)
+                
+                for i, sub_chunk in enumerate(sub_chunks):
+                    # Attempt to re-balance common markdown if broken by textwrap
+                    if sub_chunk.count('**') % 2 != 0:
+                        sub_chunk += '**'
+                    if sub_chunk.count('*') % 2 != 0 and sub_chunk.count('**') != sub_chunk.count('*'):
+                        sub_chunk += '*'
+                    if sub_chunk.count('`') % 2 != 0:
+                        sub_chunk += '`'
+                    
+                    final_safe_chunks.append(sub_chunk.strip()) # strip to remove extra newlines from wrapping
             else:
-                final_chunks.append(chunk)
+                # Ensure all markdown delimiters are balanced
+                # This part is crucial for making sure each chunk is valid Markdown.
+                balanced_chunk = chunk
+                
+                # Balance triple backticks
+                if balanced_chunk.count('```') % 2 != 0:
+                    if balanced_chunk.strip().startswith('```'):
+                        balanced_chunk += '\n```'
+                    elif balanced_chunk.strip().endswith('```'):
+                        balanced_chunk = '```\n' + balanced_chunk
 
-        return final_chunks
+                # Balance single backticks (inline code)
+                if balanced_chunk.count('`') % 2 != 0 and '```' not in balanced_chunk:
+                    balanced_chunk += '`'
+
+                # Balance bold/italic. This is tricky without a full Markdown parser.
+                # A simple check for unmatched pairs, assuming they don't span across ```
+                if '```' not in balanced_chunk:
+                    if balanced_chunk.count('**') % 2 != 0:
+                        balanced_chunk += '**'
+                    if balanced_chunk.count('*') % 2 != 0 and balanced_chunk.count('**')*2 != balanced_chunk.count('*'):
+                        balanced_chunk += '*'
+                
+                final_safe_chunks.append(balanced_chunk.strip()) # strip to remove extra newlines
+
+        # Remove any empty strings that might have resulted from splitting
+        return [chunk for chunk in final_safe_chunks if chunk]
 
     async def call_langflow_api(self, input_value: str) -> Union[str, None]:
         """

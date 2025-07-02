@@ -33,6 +33,7 @@ services:
       # - LANGFLOW_AUTO_LOGIN=true
       # - LANGFLOW_SUPERUSER=admin
       # - LANGFLOW_SUPERUSER_PASSWORD=admin123
+      # This variable defines the path where Langflow will load flows from.
       # - LANGFLOW_LOAD_FLOWS_PATH=/app/langflow/flows
     volumes:
       - ./langflow/langflow-data:/app/langflow

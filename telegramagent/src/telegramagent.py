@@ -4,18 +4,19 @@ from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filte
 from telegram.constants import ChatAction
 import logging 
 import requests
-import whisper
 from typing import Union
 import re
 import asyncio
 import aiohttp
 import textwrap
 
+from .graphrunner import LangflowRunner
+
 MAX_LENGTH = 4096  # Telegram message limit
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 LANGFLOW_TOKEN = os.getenv("LANGFLOW_TOKEN")
 LANGFLOW_FLOW_ID = os.getenv("LANGFLOW_FLOW_ID")
-WHISPER=True
+WHISPER=False
 
 async def keep_typing(context, chat_id, stop_event):
     """Keep sending typing indicator every 4 seconds until stopped"""
@@ -26,58 +27,89 @@ async def keep_typing(context, chat_id, stop_event):
         except Exception as e:
             logging.error(f"Error in keep_typing: {e}")
             break
-
-def with_langflow_api(func):
-    async def wrapper(self, update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        stop_typing = asyncio.Event()
-        
-        # Start continuous typing indicator
-        typing_task = asyncio.create_task(
-            keep_typing(context, update.effective_chat.id, stop_typing)
-        )
-        
-        try:
-            # Call the original handler
-            incoming = await func(self, update, context, *args, **kwargs)
-            
-            # Process with Langflow if needed
-            if incoming:
-                reply = self.call_langflow_api(incoming)
-                await self.reply(reply, update)
-        
-        finally:
-            # Stop the typing indicator
-            stop_typing.set()
-            typing_task.cancel()
-            try:
-                await typing_task
-            except asyncio.CancelledError:
-                pass
-    
-    return wrapper
-
 class TelegramAgent:
     def __init__(self, 
                  verbose=logging.INFO):
         
         self.init_logger(verbose)
         self.init_app()
+        self.init_llm()
+        self.init_text_to_speech()
 
-        if WHISPER==True:
-            self.whisper_model=whisper.load_model("small")
-            self.tmp_folder=os.path.join(os.getcwd(), "temp")
-            os.makedirs(self.tmp_folder, exist_ok=True)  # Ensure temp folder exists
-    
-    def run(self):
+    def listen(self):
+        """Start the bot with proper event loop handling"""
         self.logger.info("Bot is running and waiting for messages...")
-        self.app.run_polling()
+        
+        # Check if we're in an environment with an existing event loop
+        try:
+            loop = asyncio.get_running_loop()
+            self.logger.info("Existing event loop detected. Using async method.")
+            # If there's already a running loop, use the async version
+            return self.listen_async()
+        except RuntimeError:
+            # No running loop, safe to use run_polling
+            self.logger.info("No existing event loop. Using run_polling.")
+            self.app.run_polling()
+
+    async def listen_async(self):
+        """Async version for environments with existing event loops"""
+        # Initialize the application
+        await self.app.initialize()
+        await self.app.start()
+        
+        # Start polling
+        await self.app.updater.start_polling()
+        
+        try:
+            # Keep running until interrupted
+            while True:
+                await asyncio.sleep(1)
+        except KeyboardInterrupt:
+            self.logger.info("Received interrupt signal. Shutting down...")
+        finally:
+            # Clean shutdown
+            await self.app.updater.stop()
+            await self.app.stop()
+            await self.app.shutdown()
+
+    def listen_in_thread(self):
+        """Alternative: Run the bot in a separate thread"""
+        import threading
+        
+        def run_bot():
+            # Create a new event loop for this thread
+            new_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(new_loop)
+            
+            try:
+                self.logger.info("Bot is running in separate thread...")
+                self.app.run_polling()
+            finally:
+                new_loop.close()
+        
+        # Start the bot in a separate thread
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread.start()
+        
+        self.logger.info("Bot started in background thread.")
+        return bot_thread
         
     def init_app(self):
         self.app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text_message))
         self.app.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message))
 
-    async def reply(self, reply: str,  update: Update):
+    def init_text_to_speech(self): 
+        if WHISPER==True:
+            import whisper
+            self.whisper_model=whisper.load_model("small")
+            self.tmp_folder=os.path.join(os.getcwd(), "temp")
+            os.makedirs(self.tmp_folder, exist_ok=True)  # Ensure temp folder exists
+
+    def init_llm(self):
+        self.llm=LangflowRunner(verbose=self.logger.level)
+    
+    async def send_reply(self, reply: str,  update: Update):
         try:
             if reply:
                 for chunk in self._split_message(reply):
@@ -85,6 +117,7 @@ class TelegramAgent:
 
             else:
                 await update.message.reply_text("Sorry, I couldn't process your message right now.")
+        
         except Exception as e:
             self.logger.error(f'Failed to send reply: {e}')
 
@@ -110,7 +143,7 @@ class TelegramAgent:
             # Prevent logs from propagating to the root logger
             self.logger.propagate = False
 
-    async def reply_with_langflow_api(self, incoming: str, update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+    async def reply_with_llm(self, incoming: str, update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
 
         stop_typing = asyncio.Event()
     
@@ -120,10 +153,10 @@ class TelegramAgent:
         )
         
         try:
-            # Process with Langflow if needed
+            # Process with LLM if needed
             if incoming:
-                reply = await self.call_langflow_api(incoming)
-                await self.reply(reply, update)
+                reply = await self.llm.run(incoming)
+                await self.send_reply(reply, update)
 
             else:
                 await update.message.reply_text("Sorry, I couldn't process your message right now.")
@@ -142,10 +175,10 @@ class TelegramAgent:
                                    context: ContextTypes.DEFAULT_TYPE):
         incoming = update.message.text
         chat_id = update.effective_chat.id
-        from_user__username=update.message.from_user.username
-        self.logger.info(f"Message from {from_user__username}: {incoming}")
+        from_user_username=update.message.from_user.username
+        self.logger.info(f"Message from {from_user_username}: {incoming}")
 
-        await self.reply_with_langflow_api(incoming, update, context)
+        await self.reply_with_llm(incoming, update, context)
 
         pass
     
@@ -154,19 +187,18 @@ class TelegramAgent:
                                     context: ContextTypes.DEFAULT_TYPE):
         voice = update.message.voice
         chat_id = update.effective_chat.id
-        from_user__username=update.message.from_user.username
+        from_user_username=update.message.from_user.username
         file = await context.bot.get_file(voice.file_id)
         
         # download the voice message to a temporary file
         file_path = os.path.join(self.tmp_folder, f"voice.ogg")
         await file.download_to_drive(file_path)
         
-        # text to speech conversion using Whisper
-        if WHISPER==True:
-            incoming = self.text_to_speech_whisper(file_path)
-            self.logger.info(f"Message from {from_user__username}: {incoming}")
+        # text to speech conversion
+        incoming = self.text_to_speech(file_path)
+        self.logger.info(f"Message from {from_user_username}: {incoming}")
 
-            await self.reply_with_langflow_api(incoming, update, context)
+        await self.reply_with_llm(incoming, update, context)
         
         pass
 
@@ -361,63 +393,21 @@ class TelegramAgent:
 
         # Remove any empty strings that might have resulted from splitting
         return [chunk for chunk in final_safe_chunks if chunk]
-
-    async def call_langflow_api(self, input_value: str) -> Union[str, None]:
-        """
-        Async version using aiohttp - RECOMMENDED APPROACH
-        """
-        self.logger.info(f"Calling Langflow...")
-        # flow_id = '51efbc8d-c17f-4503-b694-8c5adb7578d5/api/v1/run/ba452ad5-8cc7-41cc-a73d-7f42e3dddcc6'
-        # url = f"https://api.langflow.astra.datastax.com/lf/{flow_id}"
-
-        url=f"http://langflow:7860/api/v1/run/{LANGFLOW_FLOW_ID}"
- 
-
-        payload = {
-            "input_value": input_value,
-            "output_type": "chat",
-            "input_type": "chat"
-        }
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {LANGFLOW_TOKEN}"
-        }
-
-        try:
-            # Use aiohttp for async HTTP requests
-            timeout = aiohttp.ClientTimeout(total=1200)  # 20 minutes timeout
-            
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, json=payload, headers=headers) as response:
-                    response.raise_for_status()
-                    
-                    response_data = await response.json()
-                    text = response_data['outputs'][0]['outputs'][0]["results"]["message"]["text"]
-                    text = text.strip()
-                    
-                    self.logger.info(f'Session ID {response_data["session_id"]}')
-                    return text
-
-        except aiohttp.ClientError as e:
-            self.logger.error(f"Error making async API request: {e}")
-            return None
-        except (KeyError, ValueError) as e:
-            self.logger.error(f"Error parsing response: {e}")
-            return None
-        except Exception as e:
-            self.logger.error(f"Unexpected error: {e}")
-            return None
         
-    def text_to_speech_whisper(self, audio)->Union[str, None]:
+    def text_to_speech(self, audio)->Union[str, None]:
         try:
-            result = self.whisper_model.transcribe(audio,
-                                                    language="en",
-                                                    beam_size=5,             # Better decoding (default is 5)
-                                                    best_of=5,               # Tries multiple candidates
-                                                    fp16=False 
-                                                    )
-            return result["text"]
+            if WHISPER == True:
+                result = self.whisper_model.transcribe(audio,
+                                                        language="en",
+                                                        beam_size=5,             # Better decoding (default is 5)
+                                                        best_of=5,               # Tries multiple candidates
+                                                        fp16=False 
+                                                        )
+                text=result["text"]
+            else: 
+                text=None
+            return text
+        
         except Exception as e:
             self.logger.error(f"Error transcribing audio: {e}")
             return None

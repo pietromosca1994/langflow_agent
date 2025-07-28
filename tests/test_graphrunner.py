@@ -6,12 +6,11 @@ PROJECT_PATH=os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, PROJECT_PATH)
 import dotenv
 
-from telegramagent.src.telegramagent import TelegramAgent
+from telegramagent.src.graphrunner import LangflowRunner
 
 dotenv.load_dotenv(override=True)
 
 #%%
-telegram_agent=TelegramAgent()
-await telegram_agent.listen_async()
-
+graph_runner = LangflowRunner()
+response= await graph_runner.run("hello",)
 # %%

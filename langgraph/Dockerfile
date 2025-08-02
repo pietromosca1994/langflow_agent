@@ -17,11 +17,10 @@ RUN apt-get update -y && apt-get upgrade -y && \
 RUN pip install --upgrade pip
 
 # Copy requirements file
-COPY ./telegramagent/requirements.txt ./requirements.txt
+COPY ./langgraph/requirements.txt ./requirements.txt
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install git+https://github.com/openai/whisper.git 
 
 # Copy the rest of the application (adjust as needed)
 # COPY ./telegramagent/ .

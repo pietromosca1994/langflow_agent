@@ -3,9 +3,18 @@ import aiohttp
 import logging 
 import os 
 from urllib.parse import urljoin
+from pydantic import BaseModel
 
 LANGFLOW_TOKEN = os.getenv("LANGFLOW_TOKEN")
 LANGFLOW_FLOW_ID = os.getenv("LANGFLOW_FLOW_ID")
+LANGFLOW_PORT = 7860
+LANGGRAPH_FLOW_ID = 'test'
+LANGGRAPH_PORT = 7861
+
+class AIMessage(BaseModel):
+    text: str
+    session_id: str
+    interrupt: bool = False
 
 class GraphRunner(ABC):
     def __init__(self, 
@@ -47,7 +56,7 @@ class GraphRunner(ABC):
             # Prevent logs from propagating to the root logger
             self.logger.propagate = False
 
-    async def _post(self, url: str, payload: dict, headers: dict):
+    async def _post(self, url: str, payload: dict, headers: dict)-> dict:
         """
         Internal method to post data to the graph.
         
@@ -62,12 +71,9 @@ class GraphRunner(ABC):
                 async with session.post(url, json=payload, headers=headers) as response:
                     response.raise_for_status()
                     
-                    response_data = await response.json()
-                    text = response_data['outputs'][0]['outputs'][0]["results"]["message"]["text"]
-                    text = text.strip()
-                    
-                    self.logger.info(f'Session ID {response_data["session_id"]}')
-                    return text
+                    response_json = await response.json()
+
+                    return response_json
 
         except aiohttp.ClientError as e:
             self.logger.error(f"Error making async API request: {e}")
@@ -78,8 +84,26 @@ class GraphRunner(ABC):
         except Exception as e:
             self.logger.error(f"Unexpected error: {e}")
             return None
-        
+        pass
 
+    @abstractmethod
+    def parse_response(self, response: dict) -> AIMessage:
+        """
+        Parse the response from the graph.
+        
+        :param response: The JSON response from the graph.
+        :return: An AIMessage object containing the parsed response.
+        """
+        pass
+
+    @abstractmethod
+    async def run(self, message: str) -> AIMessage:
+        """
+        Run the specified graph with the given message.
+        
+        :param message: The message to process.
+        :return: An AIMessage object containing the response.
+        """
         pass
 
 class LangflowRunner(GraphRunner):
@@ -87,12 +111,23 @@ class LangflowRunner(GraphRunner):
     LangflowRunner is a concrete implementation of GraphRunner that runs graphs using the Langflow API.
     """
     def __init__(self, verbose: int = logging.INFO):
-        # base_url='http://langflow:7860/api/v1/run'
-        base_url='http://localhost:7860/api/v1/run'
+        base_url=f'http://langflow:{LANGFLOW_PORT}/api/v1/run'
         super().__init__(base_url, verbose)
         pass
 
-    async def run(self, message: str):
+    def parse_response(self, response: dict) -> AIMessage:
+        text = response['outputs'][0]['outputs'][0]["results"]["message"]["text"]
+        text = text.strip()
+
+        session_id = response.get("session_id", "default_session")
+        
+        self.logger.info(f'Session ID {session_id}')
+        message=AIMessage(text=text, 
+                          session_id=response["session_id"],
+                          interrupt=False) #TODO: handle interrupt in response
+        return message
+    
+    async def run(self, message: str)->AIMessage:
         """
         Run the specified graph with the given configuration.
         """
@@ -110,6 +145,54 @@ class LangflowRunner(GraphRunner):
 
         url = urljoin(self.base_url + '/', LANGFLOW_FLOW_ID)
 
-        return await self._post(url, payload, headers)
+        response=await self._post(url, payload, headers)
+        message = self.parse_response(response)
+
+        return message
     
-# def LangflowRunner(GraphRunner):
+class LanggraphRunner(GraphRunner):
+    def __init__(self, verbose: int = logging.INFO):
+        base_url=f'http://langgraph:{LANGGRAPH_PORT}/api/v1/run'
+        super().__init__(base_url, verbose)
+        pass
+
+    def parse_response(self, response: dict) -> AIMessage:
+        """
+        Parse the response from the Langflow API.
+        
+        :param response: The JSON response from the API.
+        :return: The text content of the AI message.
+        """
+        content = response['messages'][-1]['content'].strip()
+        if "__interrupt__" in response.keys(): 
+            description = response['__interrupt__'][-1]['value'][-1]['description']
+            text = content + f"\n\nPlease review the tool call: {description}"
+            interrupt = True
+        else:
+            text = content
+            interrupt = False
+
+        message=AIMessage(text=text,
+                          session_id=response.get("session_id", "default_session"),
+                          interrupt=interrupt)
+        return message
+    
+    async def run(self, message: str, session_id: str = 'default')->AIMessage:
+        """
+        Run the specified graph with the given configuration.
+        """
+    
+        payload = {
+            "content": message,
+            "session_id": session_id
+        }
+        headers = {
+            "Content-Type": "application/json"
+        }
+
+        url = urljoin(self.base_url + '/', LANGGRAPH_FLOW_ID)
+
+        response=await self._post(url, payload, headers)
+        message = self.parse_response(response)
+
+        return message

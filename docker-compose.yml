@@ -3,11 +3,13 @@ services:
     container_name: telegramagent
     hostname: telegramagent
     restart: always
-    depends_on:
-      langflow:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
+    # depends_on:
+      # langflow:
+      #   condition: service_healthy
+      # postgres:
+      #   condition: service_healthy
+      # langgraph:
+      #   condition: service_healthy
     env_file:
       - .env
     build:
@@ -18,28 +20,53 @@ services:
     networks:
       - langflow_network
 
-  langflow:
-    image: langflowai/langflow:latest # or another version tag on https://hub.docker.com/r/langflowai/langflow
-    pull_policy: always               # set to 'always' when using 'latest' image
-    ports:
-      - "7860:7860"
-    depends_on:
-      - postgres
+  # langflow:
+  #   image: langflowai/langflow:latest # or another version tag on https://hub.docker.com/r/langflowai/langflow
+  #   pull_policy: always               # set to 'always' when using 'latest' image
+  #   ports:
+  #     - "7860:7860"
+  #   depends_on:
+  #     - postgres
+  #   environment:
+  #     - LANGFLOW_DATABASE_URL=postgresql://langflow:langflow@postgres:5432/langflow
+  #     # This variable defines where the logs, file storage, monitor data and secret keys are stored.
+  #     - LANGFLOW_CONFIG_DIR=app/langflow
+  #     - LANGFLOW_WORKER_TIMEOUT=120000
+  #     # - LANGFLOW_AUTO_LOGIN=true
+  #     # - LANGFLOW_SUPERUSER=admin
+  #     # - LANGFLOW_SUPERUSER_PASSWORD=admin123
+  #     # This variable defines the path where Langflow will load flows from.
+  #     # - LANGFLOW_LOAD_FLOWS_PATH=/app/langflow/flows
+  #   volumes:
+  #     - ./langflow/langflow-data:/app/langflow
+  #     - ./langflow/flows:/app/langflow/flows
+  #   env_file:
+  #     - .env
+  #   networks:
+  #     - langflow_network
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 5
+  #     start_period: 40s
+
+  langgraph:
+    container_name: langgraph
+    hostname: langgraph
+    restart: always
     environment:
-      - LANGFLOW_DATABASE_URL=postgresql://langflow:langflow@postgres:5432/langflow
-      # This variable defines where the logs, file storage, monitor data and secret keys are stored.
-      - LANGFLOW_CONFIG_DIR=app/langflow
-      - LANGFLOW_WORKER_TIMEOUT=120000
-      # - LANGFLOW_AUTO_LOGIN=true
-      # - LANGFLOW_SUPERUSER=admin
-      # - LANGFLOW_SUPERUSER_PASSWORD=admin123
-      # This variable defines the path where Langflow will load flows from.
-      # - LANGFLOW_LOAD_FLOWS_PATH=/app/langflow/flows
-    volumes:
-      - ./langflow/langflow-data:/app/langflow
-      - ./langflow/flows:/app/langflow/flows
+      - PORT=7861
+      - HOST=0.0.0.0
     env_file:
       - .env
+    ports:
+      - "7861:7861"
+    build:
+      context: .
+      dockerfile: ./langgraph/Dockerfile
+    volumes:
+      - ./langgraph/src:/app
     networks:
       - langflow_network
     healthcheck:
@@ -49,46 +76,23 @@ services:
       retries: 5
       start_period: 40s
 
-  postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: langflow
-      POSTGRES_PASSWORD: langflow
-      POSTGRES_DB: langflow
-    ports:
-      - "5432:5432"
-    volumes:
-      - langflow-postgres:/var/lib/postgresql/data
-    networks:
-      - langflow_network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U langflow"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # flow_import:
-  #   image: curlimages/curl:latest
-  #   depends_on:
-  #     langflow:
-  #       condition: service_healthy
-  #     postgres:
-  #       condition: service_healthy
-  #   restart: "no"
-  #   entrypoint: >
-  #     sh -c "
-  #       echo 'Waiting for Langflow to be ready...' &&
-  #       until curl -s -o /dev/null http://langflow:7860/health; do
-  #         echo 'Langflow not ready yet. Sleeping...'
-  #         sleep 5
-  #       done &&
-  #       echo 'Langflow is up! Importing flow...' &&
-  #       curl -X POST http://langflow:7860/api/v1/flows -H 'Content-Type: application/json' -H "accept: application/json" -d @/import/personal_agent.json
-  #     "
+  # postgres:
+  #   image: postgres:16
+  #   environment:
+  #     POSTGRES_USER: langflow
+  #     POSTGRES_PASSWORD: langflow
+  #     POSTGRES_DB: langflow
+  #   ports:
+  #     - "5432:5432"
   #   volumes:
-  #     - ./langflow/flows:/import
+  #     - langflow-postgres:/var/lib/postgresql/data
   #   networks:
   #     - langflow_network
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U langflow"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
 
 volumes:
   langflow-postgres:

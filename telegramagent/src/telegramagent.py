@@ -1,6 +1,6 @@
 import os 
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telegram.constants import ChatAction
 import logging 
 import requests
@@ -9,14 +9,16 @@ import re
 import asyncio
 import aiohttp
 import textwrap
+from typing import Union
 
-from .graphrunner import LangflowRunner
+from graphrunner import LangflowRunner, LanggraphRunner
 
 MAX_LENGTH = 4096  # Telegram message limit
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 LANGFLOW_TOKEN = os.getenv("LANGFLOW_TOKEN")
 LANGFLOW_FLOW_ID = os.getenv("LANGFLOW_FLOW_ID")
 WHISPER=False
+LLM='langgraph'
 
 async def keep_typing(context, chat_id, stop_event):
     """Keep sending typing indicator every 4 seconds until stopped"""
@@ -98,6 +100,7 @@ class TelegramAgent:
         self.app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text_message))
         self.app.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message))
+        self.app.add_handler(CallbackQueryHandler(self.handle_button_choice))
 
     def init_text_to_speech(self): 
         if WHISPER==True:
@@ -107,17 +110,29 @@ class TelegramAgent:
             os.makedirs(self.tmp_folder, exist_ok=True)  # Ensure temp folder exists
 
     def init_llm(self):
-        self.llm=LangflowRunner(verbose=self.logger.level)
-    
-    async def send_reply(self, reply: str,  update: Update):
-        try:
-            if reply:
-                for chunk in self._split_message(reply):
-                    await update.message.reply_text(chunk, parse_mode="Markdown")
+        if LLM == 'langflow':
+            self.llm=LangflowRunner(verbose=self.logger.level)
+        elif LLM == 'langgraph':
+            self.llm=LanggraphRunner(verbose=self.logger.level)
 
+    async def send_reply(
+        self, 
+        reply: str, 
+        update: Update, 
+        reply_markup: Union[InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove] = None
+    ):
+        try:
+            # Determine the correct message object
+            message = update.message or (
+                update.callback_query.message if update.callback_query else None
+            )
+
+            if message and reply:
+                for chunk in self._split_message(reply):
+                    await message.reply_text(chunk, parse_mode="Markdown", reply_markup=reply_markup)
             else:
-                await update.message.reply_text("Sorry, I couldn't process your message right now.")
-        
+                await message.reply_text("Sorry, I couldn't process your message right now.")
+
         except Exception as e:
             self.logger.error(f'Failed to send reply: {e}')
 
@@ -155,9 +170,18 @@ class TelegramAgent:
         try:
             # Process with LLM if needed
             if incoming:
-                reply = await self.llm.run(incoming)
-                await self.send_reply(reply, update)
+                message = await self.llm.run(incoming)
 
+                # handle human-in-the-loop interaction 
+                if message.interrupt==True:
+                    keyboard = [
+                        [InlineKeyboardButton("✅ Accept", callback_data="accept")],
+                        [InlineKeyboardButton("❌ Deny", callback_data="deny")]
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await self.send_reply(message.text, update, reply_markup=reply_markup)
+                else:
+                    await self.send_reply(message.text, update)
             else:
                 await update.message.reply_text("Sorry, I couldn't process your message right now.")
             # await asyncio.sleep(10)
@@ -201,6 +225,19 @@ class TelegramAgent:
         await self.reply_with_llm(incoming, update, context)
         
         pass
+
+    async def handle_button_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+
+        choice = query.data  # 'accept' or 'deny'
+
+        # You could send this back to your LangGraph as:
+        # Command(resume=[{"type": choice}])
+        await query.edit_message_text(f"You selected *{choice.upper()}*.", parse_mode="Markdown")
+        self.logger.info(f"Selected: {choice}")
+
+        await self.reply_with_llm(choice, update, context)
 
     @staticmethod
     def _split_message(text: str, max_length: int = MAX_LENGTH) -> list[str]:

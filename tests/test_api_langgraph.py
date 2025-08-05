@@ -1,7 +1,7 @@
 #%%
 import requests
 
-BASE_URL = "http://langgraph:7861"  # Change if your server is running elsewhere
+BASE_URL = "http://localhost:5000"  # Change if your server is running elsewhere
 
 def test_ping():
     url = f"{BASE_URL}/ping"
@@ -34,8 +34,14 @@ def test_run(graph_id="test_graph", content="Hello from test script", session_id
 test_ping()
 
 #%%
-# test run
+# test MCP run
+response=test_run('test',
+                  content="which tools do you have available?")
+print(response.json()['messages'][-1]['content'])
+
+#%%
+# test human in the loop run
 response=test_run('test',
                   content="book a stay at McKittrick hotel")
-print(response.json())
+print(response.json()['messages'][-1]['content'])
 # %%

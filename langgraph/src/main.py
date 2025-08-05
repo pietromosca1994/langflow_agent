@@ -51,9 +51,10 @@ async def invoke(graph_id: str, body: InvokeModel):
                 try:
                     module_name = f"graphs.graph_{graph_id}"
                     graph_module = importlib.import_module(module_name)
-                    compiled_graph = graph_module.get_graph()
+                    compiled_graph = await graph_module.get_graph()
                     graph_cache[graph_id] = Graph(graph=compiled_graph)
                     logging.info(f"Graph {graph_id} loaded successfully.")
+                
                 except ModuleNotFoundError:
                     raise HTTPException(status_code=404, detail=f"Graph module '{module_name}' not found")
                 except AttributeError:
@@ -76,8 +77,8 @@ async def invoke(graph_id: str, body: InvokeModel):
     config = {"configurable": {"thread_id": body.session_id}}
 
     try:
-        # Use the actual input content instead of hardcoded strin
-        response = graph_data.graph.invoke(input_data, config)
+        # ainvoke ensures that the graph is invoked asynchronously (for MCP tools)
+        response = await graph_data.graph.ainvoke(input_data, config)
         
         if '__interrupt__' in response.keys():
             graph_data.interrupt = True
@@ -104,5 +105,5 @@ def listen():
     logging.info(f"Running {app.title} @ {host}:{port}")
     uvicorn.run("main:app", host=host, port=port, reload=False)
 
-if __name__=='__main__':
+if __name__=='__main__':    
     listen()

@@ -1,30 +1,37 @@
 import os 
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import User, Update, Message, Chat, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telegram.constants import ChatAction
-import logging 
-import requests
-from typing import Union
+import logging
 import re
 import asyncio
-import aiohttp
 import textwrap
-from typing import Union
+from typing import Union, Literal
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, status
+from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
+import uvicorn
+import threading
+from pydantic import BaseModel
+import datetime
 
 from graphrunner import LangflowRunner, LanggraphRunner
+from models import WebhookBody
 
 MAX_LENGTH = 4096  # Telegram message limit
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 LANGFLOW_TOKEN = os.getenv("LANGFLOW_TOKEN")
 LANGFLOW_FLOW_ID = os.getenv("LANGFLOW_FLOW_ID")
 WHISPER=False
-LLM='langgraph'
+LLM_FRAMEWORK='langgraph'
+DEFAULT_HOST="127.0.0.1"
+DEFAULT_PORT=5000
 
-async def keep_typing(context, chat_id, stop_event):
+async def keep_typing(bot, chat_id, stop_event):
     """Keep sending typing indicator every 4 seconds until stopped"""
     while not stop_event.is_set():
         try:
-            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
             await asyncio.sleep(4)  # Typing indicator lasts ~5 seconds
         except Exception as e:
             logging.error(f"Error in keep_typing: {e}")
@@ -35,11 +42,13 @@ class TelegramAgent:
         
         self.init_logger(verbose)
         self.init_app()
-        self.init_llm()
+        self.init_llm(LLM_FRAMEWORK)
         self.init_text_to_speech()
+        self.init_webhook_server()
 
     def listen(self):
         """Start the bot with proper event loop handling"""
+        self.start_webhook_server()
         self.logger.info("Bot is running and waiting for messages...")
         
         # Check if we're in an environment with an existing event loop
@@ -56,11 +65,13 @@ class TelegramAgent:
     async def listen_async(self):
         """Async version for environments with existing event loops"""
         # Initialize the application
+        self.start_webhook_server()
         await self.app.initialize()
         await self.app.start()
         
         # Start polling
         await self.app.updater.start_polling()
+        self.logger.info("Bot is running and waiting for messages...")
         
         try:
             # Keep running until interrupted
@@ -77,7 +88,7 @@ class TelegramAgent:
     def listen_in_thread(self):
         """Alternative: Run the bot in a separate thread"""
         import threading
-        
+        self.start_webhook_server()
         def run_bot():
             # Create a new event loop for this thread
             new_loop = asyncio.new_event_loop()
@@ -109,11 +120,165 @@ class TelegramAgent:
             self.tmp_folder=os.path.join(os.getcwd(), "temp")
             os.makedirs(self.tmp_folder, exist_ok=True)  # Ensure temp folder exists
 
-    def init_llm(self):
-        if LLM == 'langflow':
+    def init_llm(self, framework: Literal['langflow', 'langgraph']):
+        if framework == 'langflow':
             self.llm=LangflowRunner(verbose=self.logger.level)
-        elif LLM == 'langgraph':
+        elif framework == 'langgraph':
             self.llm=LanggraphRunner(verbose=self.logger.level)
+
+    def init_webhook_server(self):
+        """Initialize FastAPI webhook server"""
+        self.webhook_app = FastAPI(title="Telegram Agent Webhook Server")
+        
+        # Store reference to self for use in route handlers
+        self.webhook_app.state.agent = self
+        
+    #     # Add webhook routes
+    #     self.setup_webhook_routes()
+
+    # def setup_webhook_routes(self):
+    #     """Setup webhook routes"""
+        
+        @self.webhook_app.post("/webhook/message")
+        async def handle_webhook_message(
+            request: Request,
+            body: WebhookBody,
+            background_tasks: BackgroundTasks
+        ):
+            """Handle incoming webhook messages"""
+            try:
+                # # Optional: Verify webhook secret
+                # auth_header = request.headers.get("Authorization")
+                # if WEBHOOK_SECRET and auth_header != f"Bearer {WEBHOOK_SECRET}":
+                #     raise HTTPException(status_code=401, detail="Invalid authorization")
+                
+                # Log the incoming webhook message
+                self.logger.info(f"Webhook message from {body.source}: {body.text}")
+                
+                # Process message in background
+                background_tasks.add_task(
+                    self._handle_webhook_response,
+                    body
+                )
+                
+                return JSONResponse({
+                    "status": "success",
+                    "message": "Message received and queued for processing"
+                })
+                
+            except Exception as e:
+                self.logger.error(f"Error handling webhook message: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @self.webhook_app.get("/webhook/ping")
+        async def ping():
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content=jsonable_encoder({
+                    'service': 'TelegramAgent Microservice',
+                    'version': '0.1.0',
+                    'date_time': datetime.datetime.now().isoformat()
+                })
+            )
+    
+    async def _handle_webhook_response(self, body: WebhookBody):
+        text=body.text
+        chat_id=body.chat_id
+        chat=await self.app.bot.get_chat(chat_id)
+        update=Update(update_id=1,
+                      message=Message(message_id=1,
+                                      text=text,
+                                      date=datetime.datetime.now(),
+                                      from_user=User(id=chat_id, 
+                                                     first_name=chat.first_name,
+                                                     last_name=chat.last_name,
+                                                     username=chat.username, 
+                                                     is_bot=True),
+                                      chat=Chat(id= chat_id,
+                                                type=chat.type)
+                                     ),
+                      )
+        await self._handle_text_message(update)
+        pass
+    
+    def start_webhook_server(self):
+        """Start the webhook server in a separate thread"""
+
+        host = DEFAULT_HOST if "HOST" not in os.environ else os.environ["HOST"]
+        if host == DEFAULT_HOST:
+            logging.warning("Using default host")
+
+        port = DEFAULT_PORT if "PORT" not in os.environ else int(os.environ["PORT"])  
+        
+        def run_server():
+            uvicorn.run(
+                self.webhook_app,
+                host=host,
+                port=port,
+                log_level="info"
+            )
+        
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+        self.logger.info(f"Webhook server started @ {host}:{port}")
+        return server_thread
+    
+        # @self.webhook_app.post("/webhook/custom/{source}")
+        # async def handle_custom_webhook(
+        #     source: str,
+        #     request: Request,
+        #     background_tasks: BackgroundTasks
+        # ):
+        #     """Handle custom webhook formats from different sources"""
+        #     try:
+        #         # Get raw body
+        #         body = await request.body()
+                
+        #         # Try to parse as JSON
+        #         try:
+        #             data = json.loads(body.decode('utf-8'))
+        #         except json.JSONDecodeError:
+        #             data = {"raw_body": body.decode('utf-8')}
+                
+        #         # Convert to standard format
+        #         message = self.convert_custom_webhook(source, data)
+                
+        #         if message:
+        #             self.logger.info(f"Custom webhook from {source}: {message.text}")
+                    
+        #             # Process message in background
+        #             background_tasks.add_task(
+        #                 self.process_webhook_message,
+        #                 message
+        #             )
+                
+        #         return JSONResponse({
+        #             "status": "success",
+        #             "source": source,
+        #             "message": "Webhook processed"
+        #         })
+                
+        #     except Exception as e:
+        #         self.logger.error(f"Error handling custom webhook from {source}: {e}")
+        #         raise HTTPException(status_code=500, detail=str(e))
+    async def send_text_message(self, text: str, chat_id: int, reply_markup: Union[InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove] = None):
+        '''
+        chat_id: Refers to the unique ID of the chat (group, channel, or 1-on-1).
+        user_id: Refers to the unique ID of a user.
+        In private chats (where the bot and user communicate directly), chat_id is equal to user.id.
+        The telegram bot cannot initiate a conversation with a user unless the user has already started the chat by sending a message or clicking “Start” first. This is a Telegram platform restriction.
+        '''
+        try:
+            bot = self.app.bot
+            for chunk in self._split_message(text):
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup
+                )
+        except Exception as e:
+            self.logger.error(f"Failed to send message to {chat_id}: {e}")
 
     async def send_reply(
         self, 
@@ -158,13 +323,13 @@ class TelegramAgent:
             # Prevent logs from propagating to the root logger
             self.logger.propagate = False
 
-    async def reply_with_llm(self, incoming: str, update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+    async def reply_with_llm(self, incoming: str, chat_id: int, *args, **kwargs):
 
         stop_typing = asyncio.Event()
     
         # Start continuous typing indicator
         typing_task = asyncio.create_task(
-            keep_typing(context, update.effective_chat.id, stop_typing)
+            keep_typing(self.app.bot, chat_id, stop_typing)
         )
         
         try:
@@ -179,11 +344,11 @@ class TelegramAgent:
                         [InlineKeyboardButton("❌ Deny", callback_data="deny")]
                     ]
                     reply_markup = InlineKeyboardMarkup(keyboard)
-                    await self.send_reply(message.text, update, reply_markup=reply_markup)
+                    await self.send_text_message(message.text, chat_id, reply_markup=reply_markup)
                 else:
-                    await self.send_reply(message.text, update)
+                    await self.send_text_message(message.text, chat_id)
             else:
-                await update.message.reply_text("Sorry, I couldn't process your message right now.")
+                await self.send_text_message(None, chat_id)
             # await asyncio.sleep(10)
         finally:
             # Stop the typing indicator
@@ -194,25 +359,29 @@ class TelegramAgent:
             except asyncio.CancelledError:
                 pass
 
+    def _log_message(self, update: Update):
+        self.logger.info(
+            f"\n📨 Incoming message\n"
+            f"   👤 From:    {update.message.from_user.username}\n"
+            f"   🆔 Chat ID: {update.effective_chat.id}\n"
+            f"   💬 Message: {update.message.text}"
+        )
+
     async def _handle_text_message(self, 
-                                   update: Update, 
-                                   context: ContextTypes.DEFAULT_TYPE):
+                                   update: Update):
         incoming = update.message.text
         chat_id = update.effective_chat.id
-        from_user_username=update.message.from_user.username
-        self.logger.info(f"Message from {from_user_username}: {incoming}")
+        self._log_message(update)
 
-        await self.reply_with_llm(incoming, update, context)
+        await self.reply_with_llm(incoming, chat_id)
 
         pass
     
     async def _handle_voice_message(self,
-                                    update: Update, 
-                                    context: ContextTypes.DEFAULT_TYPE):
+                                    update: Update):
         voice = update.message.voice
         chat_id = update.effective_chat.id
-        from_user_username=update.message.from_user.username
-        file = await context.bot.get_file(voice.file_id)
+        file = await self.app.bot.get_file(voice.file_id)
         
         # download the voice message to a temporary file
         file_path = os.path.join(self.tmp_folder, f"voice.ogg")
@@ -220,13 +389,14 @@ class TelegramAgent:
         
         # text to speech conversion
         incoming = self.text_to_speech(file_path)
-        self.logger.info(f"Message from {from_user_username}: {incoming}")
+        self._log_message(update)
 
-        await self.reply_with_llm(incoming, update, context)
+        await self.reply_with_llm(incoming, chat_id)
         
         pass
 
-    async def handle_button_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def handle_button_choice(self, update: Update):
+        chat_id = update.effective_chat.id
         query = update.callback_query
         await query.answer()
 
@@ -237,7 +407,7 @@ class TelegramAgent:
         await query.edit_message_text(f"You selected *{choice.upper()}*.", parse_mode="Markdown")
         self.logger.info(f"Selected: {choice}")
 
-        await self.reply_with_llm(choice, update, context)
+        await self.reply_with_llm(choice, chat_id)
 
     @staticmethod
     def _split_message(text: str, max_length: int = MAX_LENGTH) -> list[str]:

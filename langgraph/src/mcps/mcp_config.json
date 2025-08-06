@@ -1,9 +1,16 @@
 {
   "mcpServers": {
-    "test": {
-      "command": "python",
-      "args": ["C:/Users/pmosca/Desktop/repos/langflow_agent/langgraph/src/mcps/test_mcp/src/mcp_test.py"],
+    "DIMO": {
+      "command": "C:/Users/pmosca/miniconda3/envs/dimo_env/Scripts/mcp.exe",
+      "args": [
+        "run",
+        "C:/Users/pmosca/Desktop/repos/dimo_mcp/src/dimo_mcp.py"
+      ],
+      "env": {
+        "DIMO_CLIENT_ID": "0x14C21aB21F1F186455B718B8629b9Ed5394A660a",
+        "DIMO_API_KEY": "f000a742e2aee1e6d88c42744fdc1ac1b6b50e393c0dee3825e35f229a64ce36"
+      },
       "transport": "stdio"
-      }
     }
+  }
 }

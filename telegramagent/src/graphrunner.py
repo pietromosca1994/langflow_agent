@@ -4,12 +4,16 @@ import logging
 import os 
 from urllib.parse import urljoin
 from pydantic import BaseModel
+from typing import Literal, Union
+import requests 
+from requests.exceptions import RequestException
 
 LANGFLOW_TOKEN = os.getenv("LANGFLOW_TOKEN")
 LANGFLOW_FLOW_ID = os.getenv("LANGFLOW_FLOW_ID")
 LANGFLOW_PORT = 7860
 LANGGRAPH_FLOW_ID = 'test'
 LANGGRAPH_PORT = 7861
+ENV: Literal['prod', 'dev'] = os.getenv('ENV', 'prod')
 
 class AIMessage(BaseModel):
     text: str
@@ -22,7 +26,18 @@ class GraphRunner(ABC):
                  verbose: int = logging.INFO):
         self.init_logger(verbose)
         self.base_url = base_url
+        self._ping_server(base_url)
         pass
+
+    def _ping_server(self, url: str) -> bool:
+        """Ping the server with a HEAD request."""
+        try:
+            response = requests.head(url, timeout=3)
+            self.logger.info(f'Successfully connected to graph server @ {url}')
+            return response.status_code < 400
+        except RequestException as e:
+            self.logger.warning(f"Ping to graph server @ {url} failed: {e}")
+            return False
     
     @abstractmethod
     def run(self, graph_id: str, config: dict = None):
@@ -56,7 +71,7 @@ class GraphRunner(ABC):
             # Prevent logs from propagating to the root logger
             self.logger.propagate = False
 
-    async def _post(self, url: str, payload: dict, headers: dict)-> dict:
+    async def _post(self, url: str, payload: dict, headers: dict)-> Union[dict, None]:
         """
         Internal method to post data to the graph.
         
@@ -111,20 +126,35 @@ class LangflowRunner(GraphRunner):
     LangflowRunner is a concrete implementation of GraphRunner that runs graphs using the Langflow API.
     """
     def __init__(self, verbose: int = logging.INFO):
-        base_url=f'http://langflow:{LANGFLOW_PORT}/api/v1/run'
+        match ENV:
+            case 'dev':
+                host='localhost'
+                port=5000
+            case 'prod':
+                host='langgraph'
+                port=LANGFLOW_PORT
+
+        base_url=f'http://{host}:{port}/api/v1/run'
         super().__init__(base_url, verbose)
         pass
 
-    def parse_response(self, response: dict) -> AIMessage:
-        text = response['outputs'][0]['outputs'][0]["results"]["message"]["text"]
-        text = text.strip()
+    def parse_response(self, response: dict=None) -> AIMessage:
+        if response: 
+            text = response['outputs'][0]['outputs'][0]["results"]["message"]["text"]
+            text = text.strip()
 
-        session_id = response.get("session_id", "default_session")
-        
-        self.logger.info(f'Session ID {session_id}')
-        message=AIMessage(text=text, 
-                          session_id=response["session_id"],
-                          interrupt=False) #TODO: handle interrupt in response
+            session_id = response.get("session_id", "default_session")
+            
+            self.logger.info(f'Session ID {session_id}')
+            message=AIMessage(text=text, 
+                              session_id=response["session_id"],
+                              interrupt=False) #TODO: handle interrupt in response
+        else: 
+            text='The graph  is unavailable at this time'
+            message=AIMessage(text=text,
+                              session_id='None',
+                              interrupt=False
+            )                   
         return message
     
     async def run(self, message: str)->AIMessage:
@@ -152,7 +182,15 @@ class LangflowRunner(GraphRunner):
     
 class LanggraphRunner(GraphRunner):
     def __init__(self, verbose: int = logging.INFO):
-        base_url=f'http://langgraph:{LANGGRAPH_PORT}/api/v1/run'
+        match ENV:
+            case 'dev':
+                host='localhost'
+                port=5000
+            case 'prod':
+                host='langgraph'
+                port=LANGGRAPH_PORT
+
+        base_url=f'http://{host}:{port}/api/v1/run'
         super().__init__(base_url, verbose)
         pass
 
@@ -163,18 +201,25 @@ class LanggraphRunner(GraphRunner):
         :param response: The JSON response from the API.
         :return: The text content of the AI message.
         """
-        content = response['messages'][-1]['content'].strip()
-        if "__interrupt__" in response.keys(): 
-            description = response['__interrupt__'][-1]['value'][-1]['description']
-            text = content + f"\n\nPlease review the tool call: {description}"
-            interrupt = True
-        else:
-            text = content
-            interrupt = False
+        if response: 
+            content = response['messages'][-1]['content'].strip()
+            if "__interrupt__" in response.keys(): 
+                description = response['__interrupt__'][-1]['value'][-1]['description']
+                text = content + f"\n\nPlease review the tool call: {description}"
+                interrupt = True
+            else:
+                text = content
+                interrupt = False
 
-        message=AIMessage(text=text,
-                          session_id=response.get("session_id", "default_session"),
-                          interrupt=interrupt)
+            message=AIMessage(text=text,
+                            session_id=response.get("session_id", "default_session"),
+                            interrupt=interrupt)
+        else: 
+            text='The graph  is unavailable at this time'
+            message=AIMessage(text=text,
+                              session_id='None',
+                              interrupt=False
+            )    
         return message
     
     async def run(self, message: str, session_id: str = 'default')->AIMessage:

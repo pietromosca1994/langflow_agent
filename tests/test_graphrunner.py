@@ -9,6 +9,7 @@ import dotenv
 from telegramagent.src.graphrunner import LangflowRunner, LanggraphRunner
 
 dotenv.load_dotenv(override=True)
+os.environ["ENV"] = "dev"
 
 #%%
 # test the LangflowRunner

@@ -8,13 +8,18 @@ import dotenv
 
 # from telegramagent.src.telegramagent import TelegramAgent
 from telegramagent import TelegramAgent
+from webhook import BaseWebhook
+
+# set environment variables
 dotenv.load_dotenv(override=True)
 os.environ["PORT"] = "5001"
 os.environ["ENV"] = "dev"
 
 #%%
-# set environment variable 
-telegram_agent=TelegramAgent()
+# run the telegram agent
+webhook=BaseWebhook() 
+# webhook=None
+telegram_agent=TelegramAgent(webhook=webhook)
 await telegram_agent.listen_async()
 
 # %%

@@ -101,7 +101,7 @@ def listen():
     if host == "127.0.0.1":
         logging.warning("Using default host")
 
-    port = 5000 if "PORT" not in os.environ else int(os.environ["PORT"])
+    port = 7861 if "PORT" not in os.environ else int(os.environ["PORT"])
     logging.info(f"Running {app.title} @ {host}:{port}")
     uvicorn.run("main:app", host=host, port=port, reload=False)
 

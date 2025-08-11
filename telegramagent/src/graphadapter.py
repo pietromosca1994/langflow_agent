@@ -6,6 +6,7 @@ from urllib.parse import urljoin
 from pydantic import BaseModel
 from typing import Literal, Union
 import requests 
+import time
 from requests.exceptions import RequestException
 
 LANGFLOW_TOKEN = os.getenv("LANGFLOW_TOKEN")
@@ -13,14 +14,13 @@ LANGFLOW_FLOW_ID = os.getenv("LANGFLOW_FLOW_ID")
 LANGFLOW_PORT = 7860
 LANGGRAPH_FLOW_ID = 'test'
 LANGGRAPH_PORT = 7861
-ENV: Literal['prod', 'dev'] = os.getenv('ENV', 'prod')
 
 class AIMessage(BaseModel):
     text: str
     session_id: str
     interrupt: bool = False
 
-class GraphRunner(ABC):
+class BaseGraphAdapter(ABC):
     def __init__(self, 
                  base_url: str, 
                  verbose: int = logging.INFO):
@@ -29,25 +29,26 @@ class GraphRunner(ABC):
         self._ping_server(base_url)
         pass
 
-    def _ping_server(self, url: str) -> bool:
-        """Ping the server with a HEAD request."""
-        try:
-            response = requests.head(url, timeout=3)
-            self.logger.info(f'Successfully connected to graph server @ {url}')
-            return response.status_code < 400
-        except RequestException as e:
-            self.logger.warning(f"Ping to graph server @ {url} failed: {e}")
-            return False
-    
-    @abstractmethod
-    def run(self, graph_id: str, config: dict = None):
-        """
-        Run the graph with the given ID and configuration.
-        
-        :param graph_id: The ID of the graph to run.
-        :param config: Optional configuration for the graph.
-        """
-        pass 
+    def _ping_server(self, url: str, retries: int = 3, delay: float = 1.0) -> bool:
+        """Ping the server with a HEAD request, retrying on failure."""
+        attempt = 0
+        while attempt < retries:
+            try:
+                response = requests.head(url, timeout=3)
+                if response.status_code < 400:
+                    self.logger.info(f'Successfully connected to graph server @ {url}')
+                    return True
+                else:
+                    self.logger.warning(f"Graph server @ {url} returned status {response.status_code}")
+            except RequestException as e:
+                self.logger.warning(f"Ping to graph server @ {url} failed (attempt {attempt + 1}/{retries}): {e}")
+            
+            attempt += 1
+            if attempt < retries:
+                time.sleep(delay)
+
+        self.logger.error(f"Failed to connect to graph server @ {url} after {retries} attempts")
+        return False
     
     def init_logger(self, verbose=logging.INFO):
         """Initialize the logger for the Telegram agent."""
@@ -112,7 +113,7 @@ class GraphRunner(ABC):
         pass
 
     @abstractmethod
-    async def run(self, message: str) -> AIMessage:
+    async def run(self, message: str,  session_id: str = 'default') -> AIMessage:
         """
         Run the specified graph with the given message.
         
@@ -121,19 +122,14 @@ class GraphRunner(ABC):
         """
         pass
 
-class LangflowRunner(GraphRunner):
+class LangflowAdapter(BaseGraphAdapter):
     """
-    LangflowRunner is a concrete implementation of GraphRunner that runs graphs using the Langflow API.
+    LangflowAdapter is a concrete implementation of BaseGraphAdapter that runs graphs using the Langflow API.
     """
-    def __init__(self, verbose: int = logging.INFO):
-        match ENV:
-            case 'dev':
-                host='localhost'
-                port=5000
-            case 'prod':
-                host='langgraph'
-                port=LANGFLOW_PORT
-
+    def __init__(self, 
+                 host: str = 'langgraph', 
+                 port: int = LANGGRAPH_PORT,
+                 verbose: int = logging.INFO):
         base_url=f'http://{host}:{port}/api/v1/run'
         super().__init__(base_url, verbose)
         pass
@@ -157,7 +153,7 @@ class LangflowRunner(GraphRunner):
             )                   
         return message
     
-    async def run(self, message: str)->AIMessage:
+    async def run(self, message: str,  session_id: str = 'default')->AIMessage:
         """
         Run the specified graph with the given configuration.
         """
@@ -180,16 +176,11 @@ class LangflowRunner(GraphRunner):
 
         return message
     
-class LanggraphRunner(GraphRunner):
-    def __init__(self, verbose: int = logging.INFO):
-        match ENV:
-            case 'dev':
-                host='localhost'
-                port=5000
-            case 'prod':
-                host='langgraph'
-                port=LANGGRAPH_PORT
-
+class LanggraphAdapter(BaseGraphAdapter):
+    def __init__(self, 
+                 host: str = 'langgraph', 
+                 port: int = LANGGRAPH_PORT,
+                 verbose: int = logging.INFO):
         base_url=f'http://{host}:{port}/api/v1/run'
         super().__init__(base_url, verbose)
         pass

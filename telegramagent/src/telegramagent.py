@@ -15,8 +15,9 @@ import threading
 from pydantic import BaseModel
 import datetime
 
-from graphrunner import LangflowRunner, LanggraphRunner
+from graphadapter import LangflowAdapter, LanggraphAdapter
 from models import WebhookBody
+from webhook import BaseWebhook
 
 MAX_LENGTH = 4096  # Telegram message limit
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -38,17 +39,24 @@ async def keep_typing(bot, chat_id, stop_event):
             break
 class TelegramAgent:
     def __init__(self, 
+                 webhook: BaseWebhook,
                  verbose=logging.INFO):
         
         self.init_logger(verbose)
-        self.init_app()
+        self.init_telegram_app()
         self.init_llm(LLM_FRAMEWORK)
         self.init_text_to_speech()
-        self.init_webhook_server()
+        self.webhook=webhook
+
+        if webhook:
+            self.webhook.init_server()
+            self.webhook.register_callback(self._handle_webhook_response)
 
     def listen(self):
         """Start the bot with proper event loop handling"""
-        self.start_webhook_server()
+        if self.webhook:
+            self.webhook.start_server()
+
         self.logger.info("Bot is running and waiting for messages...")
         
         # Check if we're in an environment with an existing event loop
@@ -60,17 +68,19 @@ class TelegramAgent:
         except RuntimeError:
             # No running loop, safe to use run_polling
             self.logger.info("No existing event loop. Using run_polling.")
-            self.app.run_polling()
+            self.telegram_app.run_polling()
 
     async def listen_async(self):
         """Async version for environments with existing event loops"""
         # Initialize the application
-        self.start_webhook_server()
-        await self.app.initialize()
-        await self.app.start()
+        if self.webhook:
+            self.webhook.start_server()
+
+        await self.telegram_app.initialize()
+        await self.telegram_app.start()
         
         # Start polling
-        await self.app.updater.start_polling()
+        await self.telegram_app.updater.start_polling()
         self.logger.info("Bot is running and waiting for messages...")
         
         try:
@@ -81,14 +91,16 @@ class TelegramAgent:
             self.logger.info("Received interrupt signal. Shutting down...")
         finally:
             # Clean shutdown
-            await self.app.updater.stop()
-            await self.app.stop()
-            await self.app.shutdown()
+            await self.telegram_app.updater.stop()
+            await self.telegram_app.stop()
+            await self.telegram_app.shutdown()
 
     def listen_in_thread(self):
         """Alternative: Run the bot in a separate thread"""
         import threading
-        self.start_webhook_server()
+        if self.webhook:
+            self.webhook.start_server()
+
         def run_bot():
             # Create a new event loop for this thread
             new_loop = asyncio.new_event_loop()
@@ -96,7 +108,7 @@ class TelegramAgent:
             
             try:
                 self.logger.info("Bot is running in separate thread...")
-                self.app.run_polling()
+                self.telegram_app.run_polling()
             finally:
                 new_loop.close()
         
@@ -107,11 +119,11 @@ class TelegramAgent:
         self.logger.info("Bot started in background thread.")
         return bot_thread
         
-    def init_app(self):
-        self.app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text_message))
-        self.app.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message))
-        self.app.add_handler(CallbackQueryHandler(self.handle_button_choice))
+    def init_telegram_app(self):
+        self.telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        self.telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text_message))
+        self.telegram_app.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message))
+        self.telegram_app.add_handler(CallbackQueryHandler(self.handle_button_choice))
 
     def init_text_to_speech(self): 
         if WHISPER==True:
@@ -121,70 +133,76 @@ class TelegramAgent:
             os.makedirs(self.tmp_folder, exist_ok=True)  # Ensure temp folder exists
 
     def init_llm(self, framework: Literal['langflow', 'langgraph']):
+        env=os.getenv('ENV', 'prod')
+        
         if framework == 'langflow':
-            self.llm=LangflowRunner(verbose=self.logger.level)
+            self.llm=LangflowAdapter(host=host, 
+                                     verbose=self.logger.level)
         elif framework == 'langgraph':
-            self.llm=LanggraphRunner(verbose=self.logger.level)
+            if env=='dev':
+                host='localhost'
+            self.llm=LanggraphAdapter(host=host, 
+                                      verbose=self.logger.level)
 
-    def init_webhook_server(self):
-        """Initialize FastAPI webhook server"""
-        self.webhook_app = FastAPI(title="Telegram Agent Webhook Server")
+    # def init_webhook_server(self):
+    #     """Initialize FastAPI webhook server"""
+    #     self.webhook_app = FastAPI(title="Telegram Agent Webhook Server")
         
-        # Store reference to self for use in route handlers
-        self.webhook_app.state.agent = self
+    #     # Store reference to self for use in route handlers
+    #     self.webhook_app.state.agent = self
         
-    #     # Add webhook routes
-    #     self.setup_webhook_routes()
+    # #     # Add webhook routes
+    # #     self.setup_webhook_routes()
 
-    # def setup_webhook_routes(self):
-    #     """Setup webhook routes"""
+    # # def setup_webhook_routes(self):
+    # #     """Setup webhook routes"""
         
-        @self.webhook_app.post("/webhook/message")
-        async def handle_webhook_message(
-            request: Request,
-            body: WebhookBody,
-            background_tasks: BackgroundTasks
-        ):
-            """Handle incoming webhook messages"""
-            try:
-                # # Optional: Verify webhook secret
-                # auth_header = request.headers.get("Authorization")
-                # if WEBHOOK_SECRET and auth_header != f"Bearer {WEBHOOK_SECRET}":
-                #     raise HTTPException(status_code=401, detail="Invalid authorization")
+    #     @self.webhook_app.post("/webhook/message")
+    #     async def handle_webhook_message(
+    #         request: Request,
+    #         body: WebhookBody,
+    #         background_tasks: BackgroundTasks
+    #     ):
+    #         """Handle incoming webhook messages"""
+    #         try:
+    #             # # Optional: Verify webhook secret
+    #             # auth_header = request.headers.get("Authorization")
+    #             # if WEBHOOK_SECRET and auth_header != f"Bearer {WEBHOOK_SECRET}":
+    #             #     raise HTTPException(status_code=401, detail="Invalid authorization")
                 
-                # Log the incoming webhook message
-                self.logger.info(f"Webhook message from {body.source}: {body.text}")
+    #             # Log the incoming webhook message
+    #             self.logger.info(f"Webhook message from {body.source}: {body.text}")
                 
-                # Process message in background
-                background_tasks.add_task(
-                    self._handle_webhook_response,
-                    body
-                )
+    #             # Process message in background
+    #             background_tasks.add_task(
+    #                 self._handle_webhook_response,
+    #                 body
+    #             )
                 
-                return JSONResponse({
-                    "status": "success",
-                    "message": "Message received and queued for processing"
-                })
+    #             return JSONResponse({
+    #                 "status": "success",
+    #                 "message": "Message received and queued for processing"
+    #             })
                 
-            except Exception as e:
-                self.logger.error(f"Error handling webhook message: {e}")
-                raise HTTPException(status_code=500, detail=str(e))
+    #         except Exception as e:
+    #             self.logger.error(f"Error handling webhook message: {e}")
+    #             raise HTTPException(status_code=500, detail=str(e))
         
-        @self.webhook_app.get("/webhook/ping")
-        async def ping():
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content=jsonable_encoder({
-                    'service': 'TelegramAgent Microservice',
-                    'version': '0.1.0',
-                    'date_time': datetime.datetime.now().isoformat()
-                })
-            )
+    #     @self.webhook_app.get("/webhook/ping")
+    #     async def ping():
+    #         return JSONResponse(
+    #             status_code=status.HTTP_200_OK,
+    #             content=jsonable_encoder({
+    #                 'service': 'TelegramAgent Microservice',
+    #                 'version': '0.1.0',
+    #                 'date_time': datetime.datetime.now().isoformat()
+    #             })
+    #         )
     
-    async def _handle_webhook_response(self, body: WebhookBody):
-        text=body.text
-        chat_id=body.chat_id
-        chat=await self.app.bot.get_chat(chat_id)
+    async def _handle_webhook_response(self, body: dict):
+        text=body['text']
+        chat_id=body['chat_id']
+        chat=await self.telegram_app.bot.get_chat(chat_id)
         update=Update(update_id=1,
                       message=Message(message_id=1,
                                       text=text,
@@ -201,27 +219,27 @@ class TelegramAgent:
         await self._handle_text_message(update)
         pass
     
-    def start_webhook_server(self):
-        """Start the webhook server in a separate thread"""
+    # def start_webhook_server(self):
+    #     """Start the webhook server in a separate thread"""
 
-        host = DEFAULT_HOST if "HOST" not in os.environ else os.environ["HOST"]
-        if host == DEFAULT_HOST:
-            logging.warning("Using default host")
+    #     host = DEFAULT_HOST if "HOST" not in os.environ else os.environ["HOST"]
+    #     if host == DEFAULT_HOST:
+    #         logging.warning("Using default host")
 
-        port = DEFAULT_PORT if "PORT" not in os.environ else int(os.environ["PORT"])  
+    #     port = DEFAULT_PORT if "PORT" not in os.environ else int(os.environ["PORT"])  
         
-        def run_server():
-            uvicorn.run(
-                self.webhook_app,
-                host=host,
-                port=port,
-                log_level="info"
-            )
+    #     def run_server():
+    #         uvicorn.run(
+    #             self.webhook_app,
+    #             host=host,
+    #             port=port,
+    #             log_level="info"
+    #         )
         
-        server_thread = threading.Thread(target=run_server, daemon=True)
-        server_thread.start()
-        self.logger.info(f"Webhook server started @ {host}:{port}")
-        return server_thread
+    #     server_thread = threading.Thread(target=run_server, daemon=True)
+    #     server_thread.start()
+    #     self.logger.info(f"Webhook server started @ {host}:{port}")
+    #     return server_thread
     
         # @self.webhook_app.post("/webhook/custom/{source}")
         # async def handle_custom_webhook(
@@ -261,6 +279,7 @@ class TelegramAgent:
         #     except Exception as e:
         #         self.logger.error(f"Error handling custom webhook from {source}: {e}")
         #         raise HTTPException(status_code=500, detail=str(e))
+    
     async def send_text_message(self, text: str, chat_id: int, reply_markup: Union[InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove] = None):
         '''
         chat_id: Refers to the unique ID of the chat (group, channel, or 1-on-1).
@@ -269,7 +288,7 @@ class TelegramAgent:
         The telegram bot cannot initiate a conversation with a user unless the user has already started the chat by sending a message or clicking “Start” first. This is a Telegram platform restriction.
         '''
         try:
-            bot = self.app.bot
+            bot = self.telegram_app.bot
             for chunk in self._split_message(text):
                 await bot.send_message(
                     chat_id=chat_id,
@@ -280,26 +299,26 @@ class TelegramAgent:
         except Exception as e:
             self.logger.error(f"Failed to send message to {chat_id}: {e}")
 
-    async def send_reply(
-        self, 
-        reply: str, 
-        update: Update, 
-        reply_markup: Union[InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove] = None
-    ):
-        try:
-            # Determine the correct message object
-            message = update.message or (
-                update.callback_query.message if update.callback_query else None
-            )
+    # async def send_reply(
+    #     self, 
+    #     reply: str, 
+    #     update: Update, 
+    #     reply_markup: Union[InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove] = None
+    # ):
+    #     try:
+    #         # Determine the correct message object
+    #         message = update.message or (
+    #             update.callback_query.message if update.callback_query else None
+    #         )
 
-            if message and reply:
-                for chunk in self._split_message(reply):
-                    await message.reply_text(chunk, parse_mode="Markdown", reply_markup=reply_markup)
-            else:
-                await message.reply_text("Sorry, I couldn't process your message right now.")
+    #         if message and reply:
+    #             for chunk in self._split_message(reply):
+    #                 await message.reply_text(chunk, parse_mode="Markdown", reply_markup=reply_markup)
+    #         else:
+    #             await message.reply_text("Sorry, I couldn't process your message right now.")
 
-        except Exception as e:
-            self.logger.error(f'Failed to send reply: {e}')
+    #     except Exception as e:
+    #         self.logger.error(f'Failed to send reply: {e}')
 
     def init_logger(self, verbose=logging.INFO):
         """Initialize the logger for the Telegram agent."""
@@ -329,7 +348,7 @@ class TelegramAgent:
     
         # Start continuous typing indicator
         typing_task = asyncio.create_task(
-            keep_typing(self.app.bot, chat_id, stop_typing)
+            keep_typing(self.telegram_app.bot, chat_id, stop_typing)
         )
         
         try:
@@ -381,7 +400,7 @@ class TelegramAgent:
                                     update: Update):
         voice = update.message.voice
         chat_id = update.effective_chat.id
-        file = await self.app.bot.get_file(voice.file_id)
+        file = await self.telegram_app.bot.get_file(voice.file_id)
         
         # download the voice message to a temporary file
         file_path = os.path.join(self.tmp_folder, f"voice.ogg")

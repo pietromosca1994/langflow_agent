@@ -64,45 +64,48 @@ def add_human_in_the_loop(
 
     return call_tool_with_interrupt
 
-async def get_mcp_tools() -> List[BaseTool]:
+async def get_mcp_tools(
+    config_path: Path = Path(__file__).parent.parent / "mcps" / "mcp_config.json"
+) -> List[BaseTool]:
     """
     Load MCP tools from configuration file.
     Ref: https://langchain-ai.github.io/langgraph/agents/mcp/#use-mcp-tools
-    
-    Returns:
-        List[BaseTool]: The list of MCP tools, or an empty list if errors occur.
     """
     mcp_tools: List[BaseTool] = []
-    try:
-        # Resolve path to config
-        current_dir = Path(__file__).parent
-        config_path = current_dir.parent / "mcps" / "mcp_config.json"
 
+    try:
         if not config_path.exists():
             logging.warning(f"Configuration file not found: {config_path}")
             return mcp_tools
 
         # Load config JSON
         try:
-            with open(config_path, "r") as f:
-                mcp_servers = json.load(f)
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_data = json.load(f)
         except json.JSONDecodeError as e:
             logging.error(f"Invalid JSON in config file: {e}")
             return mcp_tools
 
         # Validate expected structure
-        if 'mcpServers' not in mcp_servers or not isinstance(mcp_servers['mcpServers'], dict):
+        mcp_servers = config_data.get("mcpServers")
+        if not isinstance(mcp_servers, dict):
             logging.error("Missing or invalid 'mcpServers' section in config.")
             return mcp_tools
 
-        connections = mcp_servers['mcpServers']
-        logging.info(f"Found MCP servers: {list(connections.keys())}")
+        logging.info(f"Found MCP servers: {list(mcp_servers.keys())}")
 
         # Attempt to connect and fetch tools
-        client = MultiServerMCPClient(connections=connections)
-        mcp_tools = await client.get_tools()
-
-        logging.info(f"Found {len(mcp_tools)} MCP tools: {[tool.name for tool in mcp_tools]}")
+        for mcp_server, connection_config in mcp_servers.items():
+            try:
+                client = MultiServerMCPClient(connections={mcp_server: connection_config})
+                server_tools = await client.get_tools()
+                mcp_tools.extend(server_tools)
+                logging.info(
+                    f"Successfully loaded MCP server '{mcp_server}' "
+                    f"with tools: {[tool.name for tool in server_tools]}"
+                )
+            except Exception as e:
+                logging.error(f"Failed to load MCP server '{mcp_server}': {e}")
 
     except Exception as e:
         logging.error(f"Unexpected error while loading MCP tools: {e}")

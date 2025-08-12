@@ -10,8 +10,14 @@ services:
       #   condition: service_healthy
       # langgraph:
       #   condition: service_healthy
+    ports:
+      - "5001:5001"
     env_file:
       - .env
+    environment:
+      - PORT=5001
+      - HOST=0.0.0.0
+      - ENV=prod
     build:
       context: .
       dockerfile: ./telegramagent/Dockerfile
@@ -70,7 +76,7 @@ services:
     networks:
       - langflow_network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:7861/health"]
       interval: 30s
       timeout: 10s
       retries: 5

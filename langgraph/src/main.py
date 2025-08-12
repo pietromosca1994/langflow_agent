@@ -1,3 +1,4 @@
+import sys
 from fastapi import BackgroundTasks, FastAPI, status, Depends, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -14,8 +15,10 @@ from models import InvokeModel
 from dataclasses import dataclass 
 import logging
 
+VERBOSE=logging.INFO
+
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=VERBOSE,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler()]
 )
@@ -31,7 +34,29 @@ class Graph:
 graph_cache: Dict[str, Graph] = {}  # Cache for loaded graphs
 graph_cache_lock = threading.Lock()  # to protect cache updates
 
-@app.get("/ping")
+def get_graph_names(graphs_dir="graphs"):
+    """
+    Extract graph names from files in the format graph_<graph_name>.py
+    """
+    graph_names = []
+    
+    try:
+        files = os.listdir(graphs_dir)
+        
+        for file in files:
+            # Check if file matches pattern graph_*.py
+            if file.startswith("graph_") and file.endswith(".py"):
+                # Extract the graph name by removing "graph_" prefix and ".py" suffix
+                graph_name = file[6:-3]  # Remove first 6 chars ("graph_") and last 3 chars (".py")
+                graph_names.append(graph_name)
+
+        logging.info(f'Available graphs {graph_names}')      
+    except FileNotFoundError:
+        logging.error(f"Directory '{graphs_dir}' not found")
+    except Exception as e:
+        logging.error(f"Error reading directory: {e}") 
+
+@app.get("/")
 async def ping():
     return JSONResponse(
         status_code=status.HTTP_200_OK,
@@ -44,22 +69,39 @@ async def ping():
 
 @app.post("/api/v1/run/{graph_id}")
 async def invoke(graph_id: str, body: InvokeModel):
+    logging.debug(f'Calling graph {graph_id}')
+    
     # Load graph if not cached
     if graph_id not in graph_cache:
         with graph_cache_lock:
             if graph_id not in graph_cache:  # double-checked locking
                 try:
                     module_name = f"graphs.graph_{graph_id}"
+                    # logging.debug(f'Looking for module {module_name}')
+                    # logging.debug(f'sys.path: {sys.path[:3]}')  # Show first 3 entries
+                    # logging.debug(f'Current working dir: {os.getcwd()}')
                     graph_module = importlib.import_module(module_name)
+                    logging.debug(f'Successfully imported {module_name}')
+                    logging.debug(f'Module attributes: {dir(graph_module)}')
+
+                    # Check if get_graph exists
+                    if not hasattr(graph_module, 'get_graph'):
+                        raise AttributeError(f"Module {module_name} has no get_graph function")
+                    
                     compiled_graph = await graph_module.get_graph()
                     graph_cache[graph_id] = Graph(graph=compiled_graph)
                     logging.info(f"Graph {graph_id} loaded successfully.")
                 
-                except ModuleNotFoundError:
-                    raise HTTPException(status_code=404, detail=f"Graph module '{module_name}' not found")
-                except AttributeError:
-                    raise HTTPException(status_code=500, detail=f"Graph module '{module_name}' missing get_graph function")
-
+                except ImportError as e:
+                    logging.error(f'ImportError: {e}')
+                    raise HTTPException(status_code=404, detail=f"Failed to load graph module '{module_name}': {str(e)}")
+                except AttributeError as e:
+                    logging.error(f'AttributeError: {e}')
+                    raise HTTPException(status_code=500, detail=f"Graph module '{module_name}' missing get_graph function: {str(e)}")
+                except Exception as e:
+                    logging.error(f'Unexpected error loading graph: {e}')
+                    raise HTTPException(status_code=500, detail=f"Error loading graph '{graph_id}': {str(e)}")
+    
     graph_data = graph_cache[graph_id]
     logging.debug(f"Graph {graph_id} found in cache: {graph_data}")
 
@@ -106,4 +148,5 @@ def listen():
     uvicorn.run("main:app", host=host, port=port, reload=False)
 
 if __name__=='__main__':    
+    get_graph_names()
     listen()

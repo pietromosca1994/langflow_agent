@@ -1,6 +1,6 @@
 import os 
 from telegram import User, Update, Message, Chat, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, MessageHandler, CallbackQueryHandler, ContextTypes, filters, CallbackContext
 from telegram.constants import ChatAction
 import logging
 import re
@@ -136,68 +136,19 @@ class TelegramAgent:
         env=os.getenv('ENV', 'prod')
         
         if framework == 'langflow':
+            if env=='dev':
+                host='localhost'
+            else:
+                host='langflow'
             self.llm=LangflowAdapter(host=host, 
                                      verbose=self.logger.level)
         elif framework == 'langgraph':
             if env=='dev':
                 host='localhost'
+            else:
+                host='langgraph'
             self.llm=LanggraphAdapter(host=host, 
                                       verbose=self.logger.level)
-
-    # def init_webhook_server(self):
-    #     """Initialize FastAPI webhook server"""
-    #     self.webhook_app = FastAPI(title="Telegram Agent Webhook Server")
-        
-    #     # Store reference to self for use in route handlers
-    #     self.webhook_app.state.agent = self
-        
-    # #     # Add webhook routes
-    # #     self.setup_webhook_routes()
-
-    # # def setup_webhook_routes(self):
-    # #     """Setup webhook routes"""
-        
-    #     @self.webhook_app.post("/webhook/message")
-    #     async def handle_webhook_message(
-    #         request: Request,
-    #         body: WebhookBody,
-    #         background_tasks: BackgroundTasks
-    #     ):
-    #         """Handle incoming webhook messages"""
-    #         try:
-    #             # # Optional: Verify webhook secret
-    #             # auth_header = request.headers.get("Authorization")
-    #             # if WEBHOOK_SECRET and auth_header != f"Bearer {WEBHOOK_SECRET}":
-    #             #     raise HTTPException(status_code=401, detail="Invalid authorization")
-                
-    #             # Log the incoming webhook message
-    #             self.logger.info(f"Webhook message from {body.source}: {body.text}")
-                
-    #             # Process message in background
-    #             background_tasks.add_task(
-    #                 self._handle_webhook_response,
-    #                 body
-    #             )
-                
-    #             return JSONResponse({
-    #                 "status": "success",
-    #                 "message": "Message received and queued for processing"
-    #             })
-                
-    #         except Exception as e:
-    #             self.logger.error(f"Error handling webhook message: {e}")
-    #             raise HTTPException(status_code=500, detail=str(e))
-        
-    #     @self.webhook_app.get("/webhook/ping")
-    #     async def ping():
-    #         return JSONResponse(
-    #             status_code=status.HTTP_200_OK,
-    #             content=jsonable_encoder({
-    #                 'service': 'TelegramAgent Microservice',
-    #                 'version': '0.1.0',
-    #                 'date_time': datetime.datetime.now().isoformat()
-    #             })
-    #         )
     
     async def _handle_webhook_response(self, body: dict):
         text=body['text']
@@ -216,69 +167,9 @@ class TelegramAgent:
                                                 type=chat.type)
                                      ),
                       )
-        await self._handle_text_message(update)
+        context = CallbackContext(application=self.telegram_app)
+        await self._handle_text_message(update, context)
         pass
-    
-    # def start_webhook_server(self):
-    #     """Start the webhook server in a separate thread"""
-
-    #     host = DEFAULT_HOST if "HOST" not in os.environ else os.environ["HOST"]
-    #     if host == DEFAULT_HOST:
-    #         logging.warning("Using default host")
-
-    #     port = DEFAULT_PORT if "PORT" not in os.environ else int(os.environ["PORT"])  
-        
-    #     def run_server():
-    #         uvicorn.run(
-    #             self.webhook_app,
-    #             host=host,
-    #             port=port,
-    #             log_level="info"
-    #         )
-        
-    #     server_thread = threading.Thread(target=run_server, daemon=True)
-    #     server_thread.start()
-    #     self.logger.info(f"Webhook server started @ {host}:{port}")
-    #     return server_thread
-    
-        # @self.webhook_app.post("/webhook/custom/{source}")
-        # async def handle_custom_webhook(
-        #     source: str,
-        #     request: Request,
-        #     background_tasks: BackgroundTasks
-        # ):
-        #     """Handle custom webhook formats from different sources"""
-        #     try:
-        #         # Get raw body
-        #         body = await request.body()
-                
-        #         # Try to parse as JSON
-        #         try:
-        #             data = json.loads(body.decode('utf-8'))
-        #         except json.JSONDecodeError:
-        #             data = {"raw_body": body.decode('utf-8')}
-                
-        #         # Convert to standard format
-        #         message = self.convert_custom_webhook(source, data)
-                
-        #         if message:
-        #             self.logger.info(f"Custom webhook from {source}: {message.text}")
-                    
-        #             # Process message in background
-        #             background_tasks.add_task(
-        #                 self.process_webhook_message,
-        #                 message
-        #             )
-                
-        #         return JSONResponse({
-        #             "status": "success",
-        #             "source": source,
-        #             "message": "Webhook processed"
-        #         })
-                
-        #     except Exception as e:
-        #         self.logger.error(f"Error handling custom webhook from {source}: {e}")
-        #         raise HTTPException(status_code=500, detail=str(e))
     
     async def send_text_message(self, text: str, chat_id: int, reply_markup: Union[InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove] = None):
         '''
@@ -298,27 +189,6 @@ class TelegramAgent:
                 )
         except Exception as e:
             self.logger.error(f"Failed to send message to {chat_id}: {e}")
-
-    # async def send_reply(
-    #     self, 
-    #     reply: str, 
-    #     update: Update, 
-    #     reply_markup: Union[InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove] = None
-    # ):
-    #     try:
-    #         # Determine the correct message object
-    #         message = update.message or (
-    #             update.callback_query.message if update.callback_query else None
-    #         )
-
-    #         if message and reply:
-    #             for chunk in self._split_message(reply):
-    #                 await message.reply_text(chunk, parse_mode="Markdown", reply_markup=reply_markup)
-    #         else:
-    #             await message.reply_text("Sorry, I couldn't process your message right now.")
-
-    #     except Exception as e:
-    #         self.logger.error(f'Failed to send reply: {e}')
 
     def init_logger(self, verbose=logging.INFO):
         """Initialize the logger for the Telegram agent."""
@@ -387,7 +257,8 @@ class TelegramAgent:
         )
 
     async def _handle_text_message(self, 
-                                   update: Update):
+                                   update: Update,
+                                   context: ContextTypes.DEFAULT_TYPE):
         incoming = update.message.text
         chat_id = update.effective_chat.id
         self._log_message(update)

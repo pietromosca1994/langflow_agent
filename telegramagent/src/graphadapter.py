@@ -206,10 +206,14 @@ class LanggraphAdapter(BaseGraphAdapter):
         """
         if response: 
             content = response['messages'][-1]['content'].strip()
+
+            # interrupt handling
             if "__interrupt__" in response.keys(): 
                 description = response['__interrupt__'][-1]['value'][-1]['description']
-                text = content + f"\n\nPlease review the tool call: {description}"
+                action_request = response['__interrupt__'][-1]['value'][-1]['action_request']
+                text = content + f"\n\nPlease review the tool call: {action_request}"
                 interrupt = True
+            # normal response
             else:
                 text = content
                 interrupt = False

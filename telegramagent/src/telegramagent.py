@@ -117,7 +117,7 @@ class TelegramAgent:
         self.telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         self.telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text_message))
         self.telegram_app.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message))
-        self.telegram_app.add_handler(CallbackQueryHandler(self.handle_button_choice))
+        self.telegram_app.add_handler(CallbackQueryHandler(self._handle_button_choice))
 
     def init_text_to_speech(self): 
         if WHISPER==True:
@@ -279,7 +279,7 @@ class TelegramAgent:
         
         pass
 
-    async def handle_button_choice(self, update: Update):
+    async def _handle_button_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
         query = update.callback_query
         await query.answer()

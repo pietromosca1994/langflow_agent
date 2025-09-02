@@ -19,8 +19,8 @@ services:
       - HOST=0.0.0.0
       - ENV=prod
     build:
-      context: .
-      dockerfile: ./telegramagent/Dockerfile
+      context: ./telegramagent
+      dockerfile: ./Dockerfile
     volumes:
       - ./telegramagent/src:/app
     networks:
@@ -99,6 +99,62 @@ services:
   #     interval: 10s
   #     timeout: 5s
   #     retries: 5
+
+  alpaca_mcp:
+    container_name: alpaca_mcp
+    hostname: alpaca
+    restart: always
+    # depends_on:
+      # langflow:
+      #   condition: service_healthy
+      # postgres:
+      #   condition: service_healthy
+      # langgraph:
+      #   condition: service_healthy
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./langgraph/src/mcps/alpaca-mcp-server/.env
+    # environment:
+    #   - PORT=5001
+    #   - HOST=0.0.0.0
+    #   - ENV=prod
+    build:
+      context: ./langgraph/src/mcps/alpaca-mcp-server
+      dockerfile: Dockerfile
+    networks:
+      - langflow_network
+    command: python alpaca_mcp_server.py --transport=http --host=0.0.0.0
+    stdin_open: true
+    tty: true
+
+  brave_mcp:
+    container_name: brave_mcp
+    hostname: brave
+    restart: always
+    # depends_on:
+      # langflow:
+      #   condition: service_healthy
+      # postgres:
+      #   condition: service_healthy
+      # langgraph:
+      #   condition: service_healthy
+    ports:
+      - "8001:8001"
+    env_file:
+      - ./langgraph/src/mcps/brave-search-mcp-server/.env
+    # environment:
+    #   - PORT=5001
+    #   - HOST=0.0.0.0
+    #   - ENV=prod
+    build:
+      context: ./langgraph/src/mcps/brave-search-mcp-server
+      dockerfile: Dockerfile
+    networks:
+      - langflow_network
+    # command: ["node", "dist/index.js"]
+    stdin_open: true
+    tty: true
 
 volumes:
   langflow-postgres:

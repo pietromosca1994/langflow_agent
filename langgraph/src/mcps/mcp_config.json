@@ -1,9 +1,12 @@
 {
   "mcpServers": {
-    "test": {
-      "command": "python",
-      "args": ["C:/Users/pmosca/Desktop/repos/langflow_agent/langgraph/src/mcps/test_mcp/src/mcp_test.py"],
-      "transport": "stdio"
-      }
+    "alpaca": {
+      "url": "http://alpaca_mcp:8000/mcp",
+      "transport": "streamable_http"
+    },
+    "brave": {
+      "url": "http://brave_mcp:8001/mcp",
+      "transport": "streamable_http"
     }
+  }
 }

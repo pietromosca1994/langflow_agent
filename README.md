@@ -28,3 +28,7 @@ client = MultiServerMCPClient(
 [Langflow Environment Variables](https://docs.langflow.org/environment-variables)  
 [Ngrok](https://ngrok.com)
 [Pinggy](https://pinggy.io)
+
+# MCPs
+[Brave Search](https://github.com/brave/brave-search-mcp-server)
+[Alpaca](https://github.com/brave/brave-search-mcp-server)
